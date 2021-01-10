@@ -24,6 +24,7 @@
 # related to our RSA key                                 #
 #                                                        #
 ##########################################################
+[ -z "$name_prefix" ] && name_prefix="${FREETZ_IMAGE_SIGNING_PREFIX}"
 name_prefix="${name_prefix:-$HOME/image_signing}"
 ##########################################################
 #                                                        #

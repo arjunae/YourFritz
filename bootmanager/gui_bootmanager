@@ -3,18 +3,18 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #######################################################################################################
 #                                                                                                     #
-# extension for the 'restart' page of AVM's FRITZ!OS GUI (reboot.lua) to provide a selection between  #
-# the two installed systems on devices with 'dual boot' support                                       #
+# extension for the 'restart' page of AVM's FRITZ!OS GUI to provide a selection between the two       #
+# installed systems on devices with 'dual boot' support                                               #
 #                                                                                                     #
 ###################################################################################################VER#
 #                                                                                                     #
-# gui_bootmanager, version 0.6                                                                        #
+# gui_bootmanager, version 0.6.5                                                                      #
 #                                                                                                     #
 # This script is a part of the YourFritz project from https://github.com/PeterPawn/YourFritz.         #
 #                                                                                                     #
 ###################################################################################################CPY#
 #                                                                                                     #
-# Copyright (C) 2014-2019 P.Haemmerlein (peterpawn@yourfritz.de)                                      #
+# Copyright (C) 2014-2020 P.Haemmerlein (peterpawn@yourfritz.de)                                      #
 #                                                                                                     #
 ###################################################################################################LIC#
 #                                                                                                     #
@@ -45,6 +45,9 @@
 # 7560 and 7580 devices) and newer devices, where a branding is always reset to the finalized value   #
 # from bootloader partition.                                                                          #
 #                                                                                                     #
+# With update to 0.6.4, support for IPQ4019-based devices was added, the restrictions are the same as #
+# for GRX5 devices.                                                                                   #
+#                                                                                                     #
 # This version is able to detect a fixed branding value, if it's set from '/etc/init.d/rc.conf' with  #
 # a modified 'export OEM' statement - in such a case, an appropriate output is generated, containing  #
 # a message about this fixed value.                                                                   #
@@ -70,7 +73,8 @@
 #                'nocache' parameter will refresh the cached data of this function again              #
 # debug        - this operation is intended only for diagnose, it shows some settings and their       #
 #                current values on STDOUT to provide information about the current system             #
-# clear_cache  - remove cached HTML output from an earlier 'html_display' call without 'nocache'      #
+# clear_cache  - remove cached HTML output and/or saved data from an earlier 'html_display' or        #
+#                'get_values' call without 'nocache' argument                                         #
 #                                                                                                     #
 # The script tries to detect the framework (if any), which was used to modify the original firmware.  #
 # To find this, it checks for the YourFritz version file, the Freetz version file and the "modfs"     #
@@ -105,7 +109,7 @@ readonly kernel_name="kernel"
 readonly filesystem_name="filesystem"
 readonly reserved_prefix="reserved"
 readonly alt_root_mount_name="alt_root"
-readonly defaults_dir="etc/default.$CONFIG_PRODUKT"
+readonly defaults_dir="etc/default.\$PRODUKT"
 readonly sysfs_block_dir="/sys/block"
 readonly loop_driver_name="loop"
 readonly backing_file_name="backing_file"
@@ -121,24 +125,33 @@ readonly radio_button_checked=" checked=\\\"checked\\\""
 #######################################################################################################
 readonly yourfritz_version_file="etc/.yourfritz_version"
 readonly freetz_version_file="etc/.freetz-version"
+readonly freetz_ng_version_file="etc/.freetz-ng-version"
 readonly modfs_version_file="etc/.modfs_version"
-readonly avm_version_file1="etc/version"
-readonly avm_version_file1_prefix="FIRMWARE_"
-readonly avm_version_file2="etc/init.d/rc.conf"
-readonly avm_version_file2_prefix="CONFIG_"
+readonly avm_version_file_old="etc/version"
+readonly avm_version_file_old_prefix="FIRMWARE_"
+readonly avm_version_file="etc/init.d/rc.conf"
+readonly avm_version_file_prefix="CONFIG_"
 readonly avm_version_main_components="VERSION SUBVERSION"
+readonly avm_version_major_name="CONFIG_VERSION_MAJOR"
 readonly avm_version_date="DATE"
-readonly version_files="$yourfritz_version_file $freetz_version_file $modfs_version_file"
-readonly modified_by="YourFritz Freetz modfs -"
+readonly avm_product_name="CONFIG_PRODUKT"
+readonly version_files="$yourfritz_version_file $freetz_ng_version_file $freetz_version_file $modfs_version_file"
+readonly modified_by="YourFritz Freetz-NG Freetz modfs -"
 #######################################################################################################
 #                                                                                                     #
-# GRX5 and VR9 specific settings                                                                      #
+# GRX5, VR9 and IPQ4019 common settings                                                               #
 #                                                                                                     #
 #######################################################################################################
 readonly mtd_filesystem_name_active="${filesystem_name}"
 readonly mtd_filesystem_name_inactive="${reserved_prefix}-${filesystem_name}"
 readonly mtd_kernel_name_active="${kernel_name}"
 readonly mtd_kernel_name_inactive="${reserved_prefix}-${kernel_name}"
+#######################################################################################################
+#                                                                                                     #
+# IPQ4019 specific settings (IPQ4018-based devices should use SPI flash with a single OS)             #
+#                                                                                                     #
+#######################################################################################################
+readonly ipq4019_cpuinfo_check="s|^model name[ \t]*: ARMv7 Processor rev 5 (v7l)\$|IPQ4019|p;tq;b;:q q"
 #######################################################################################################
 #                                                                                                     #
 # VR9 specific settings                                                                               #
@@ -206,7 +219,12 @@ change_branding_support()
 #######################################################################################################
 get_system_type()
 {
-	sed -n -e "s|^system type[ \t]*: \([^ \t]*\).*|\1|p" "$proc_cpuinfo"
+	type="$(sed -n -e "s|^system type[ \t]*: \([^ \t]*\).*|\1|p" "$proc_cpuinfo")"
+	[ -n "$type" ] && printf "%s\n" "$type" && return 0
+	type="$(sed -n -e "$ipq4019_cpuinfo_check" "$proc_cpuinfo")"
+	[ -n "$type" ] && printf "%s\n" "$type" && return 0
+	printf "%s\n" "undetected"
+	return 1
 }
 #######################################################################################################
 #                                                                                                     #
@@ -284,7 +302,7 @@ get_partition()
 		if [ "$st" = "VR9" ] || [ "$st" = "AR10" ]; then
 			[ "$1" = "$kernel_name" ] && get_mtd_partition "$1" "$2" || get_vr9_image "$1" "$2"
 			rc=$?
-		elif [ "$st" = "GRX500" ] || [ "$st" = "GRX350" ]; then
+		elif [ "$st" = "GRX500" ] || [ "$st" = "GRX350" ] || [ "$st" = "IPQ4019" ]; then
 			get_mtd_partition "$1" "$2"
 			rc=$?
 		else
@@ -424,7 +442,8 @@ get_system_branding()
 #######################################################################################################
 get_system_switch()
 (
-	sed -n -e "s/^$system_select_name\t\([01]\)/\1/p" "${1:-$urlader_environment}"
+	[ -n "$2" ] && sed -n -e "s/^$system_select_name\t[01]\(.*\)\$/\1/p" "$1" && return
+	sed -n -e "s/^$system_select_name\t\([01]\).*\$/\1/p" "${1:-$urlader_environment}"
 )
 #######################################################################################################
 #                                                                                                     #
@@ -458,7 +477,7 @@ is_kernel_present()
 is_switched()
 (
 	if [ -d "$fdt_chosen" ]; then
-		! [ "$(cat "$fdt_chosen/$system_select_name")" = "$(get_system_switch)" ]
+		! [ "$(cat "$fdt_chosen/$system_select_name" | sed -n -e "s|^\([01]\).*|\1|p")" = "$(get_system_switch)" ]
 	else
 		if [ -f "$boot_cache_file" ]; then
 			! [ "$(get_system_switch)" = "$(get_system_switch "$boot_cache_file")" ]
@@ -478,7 +497,7 @@ is_switched()
 #######################################################################################################
 switch_system()
 (
-	printf '%s\t%d\n' "$system_select_name" $(( ( $(get_system_switch) + 1 ) % 2 )) >"$urlader_environment"
+	printf '%s\t%d%s\n' "$system_select_name" $(( ( $(get_system_switch) + 1 ) % 2 )) "$(get_system_switch "$urlader_environment" 1)" >"$urlader_environment"
 )
 #######################################################################################################
 #                                                                                                     #
@@ -507,6 +526,28 @@ change_branding()
 )
 #######################################################################################################
 #                                                                                                     #
+# get product name value from AVM's rc.conf file                                                      #
+#                                                                                                     #
+# $1 - system root directory                                                                          #
+#                                                                                                     #
+#######################################################################################################
+get_product_name()
+(
+	sed -n -e "s|^[ \t]*export $avm_product_name=\"\?\([^\"]*\)\"\?\$|\1|p" "${1:-/}${1:+/}$avm_version_file" | sed -n -e \$p
+)
+#######################################################################################################
+#                                                                                                     #
+# get major version from AVM's rc.conf file                                                           #
+#                                                                                                     #
+# $1 - system root directory                                                                          #
+#                                                                                                     #
+#######################################################################################################
+get_version_major()
+(
+	sed -n -e "s|^[ \t]*export $avm_version_major_name=\"\?\([^\"]*\)\"\?\$|\1|p" "${1:-/}${1:+/}$avm_version_file" | sed -n -e \$p
+)
+#######################################################################################################
+#                                                                                                     #
 # get the contained brandings from the directory with system defaults                                 #
 #                                                                                                     #
 # $1 - system root directory                                                                          #
@@ -515,8 +556,13 @@ change_branding()
 get_brandings()
 (
 	fixed="$(get_fixed_branding "$1")" && printf "%s" "$fixed" && exit 0
-	path=${1:-/}${1:+/}$defaults_dir
-	find $path -type d -maxdepth 1 | sed -n -e "s|^$path/\(.*\)|\1|p" | sed -e '/^$/d' -e ':x;$!N;s/\n/ /;tx'
+	if [ -z "$1" ] || [ "$1" = "/" ]; then
+		eval PRODUKT="\$$avm_product_name"
+	else
+		PRODUKT="$(get_product_name "$1")"
+	fi
+	eval path="${1:-/}${1:+/}$defaults_dir"
+	find "$path" -type d -maxdepth 1 2>/dev/null | sed -n -e "s|^$path/\(.*\)|\1|p" | sed -e '/^$/d' -e ':x;$!N;s/\n/ /;tx'
 )
 #######################################################################################################
 #                                                                                                     #
@@ -529,7 +575,7 @@ get_brandings()
 get_version_main_values()
 (
 	for v in $avm_version_main_components; do
-		sed -n -e "s|^[ \t]*export $2$v=\"\?\([^\"]*\)\"\?\$|$v=\"\1\"|p" "$1"
+		sed -n -e "s|^[ \t]*export $2$v=\"\?\([^\"]*\)\"\?\$|$v=\"\1\"|p" "$1" | sed -n -e \$p
 	done
 )
 #######################################################################################################
@@ -541,8 +587,8 @@ get_version_main_values()
 #######################################################################################################
 get_new_version_main_values()
 (
-	path="${1:-/}${1:+/}$avm_version_file2"
-	prefix="$avm_version_file2_prefix"
+	path="${1:-/}${1:+/}$avm_version_file"
+	prefix="$avm_version_file_prefix"
 	get_version_main_values "$path" "$prefix"
 )
 #######################################################################################################
@@ -554,8 +600,8 @@ get_new_version_main_values()
 #######################################################################################################
 get_old_version_main_values()
 (
-	path="${1:-/}${1:+/}$avm_version_file1"
-	prefix="$avm_version_file1_prefix"
+	path="${1:-/}${1:+/}$avm_version_file_old"
+	prefix="$avm_version_file_old_prefix"
 	get_version_main_values "$path" "$prefix"
 )
 #######################################################################################################
@@ -567,9 +613,9 @@ get_old_version_main_values()
 #######################################################################################################
 has_old_version_info()
 (
-	path="${1:-/}${1:+/}$avm_version_file1"
+	path="${1:-/}${1:+/}$avm_version_file_old"
 	set -- $avm_version_main_components
-	[ -z "$(sed -n -e "s|^[ \t]*export $avm_version_file1_prefix$1=\"\?\([^\"]*\)\"\?\$|\1|p" "$path")" ] \
+	[ -z "$(sed -n -e "s|^[ \t]*export $avm_version_file_old_prefix$1=\"\?\([^\"]*\)\"\?\$|\1|p" "$path")" ] \
 		&& exit 1 || exit 0
 )
 #######################################################################################################
@@ -597,7 +643,7 @@ get_version_values()
 get_system_version()
 (
 	eval $(get_version_values "$1")
-	has_old_version_info "$1" && printf '%s%s' "$VERSION" "$SUBVERSION" || printf '%s.%s%s' "$CONFIG_VERSION_MAJOR" "$VERSION" "$SUBVERSION"
+	has_old_version_info "$1" && printf '%s%s' "$VERSION" "$SUBVERSION" || printf '%s.%s%s' "$(get_version_major "$1")" "$VERSION" "$SUBVERSION"
 )
 #######################################################################################################
 #                                                                                                     #
@@ -631,9 +677,9 @@ get_localized_date()
 #######################################################################################################
 get_system_date()
 (
-	path="${1:-/}${1:+/}$avm_version_file1"
+	path="${1:-/}${1:+/}$avm_version_file_old"
 	if has_old_version_info "$1"; then
-		d="$(sed -n -e "s|^[ \t]*export $avm_version_file1_prefix$avm_version_date=\"\?\([^\"]*\)\"\?\$|\1|p" "$path")"
+		d="$(sed -n -e "s|^[ \t]*export $avm_version_file_old_prefix$avm_version_date=\"\?\([^\"]*\)\"\?\$|\1|p" "$path")"
 		v=$(parse_date_value "$d")
 	else
 		v=$(stat -c %Y "$path")
@@ -642,7 +688,7 @@ get_system_date()
 )
 #######################################################################################################
 #                                                                                                     #
-# get system build date from specified root as a string valu with localization                        #
+# get system build date from specified root as a string value with localization                       #
 #                                                                                                     #
 # $1 - system root directory                                                                          #
 #                                                                                                     #
@@ -1216,7 +1262,7 @@ collect_data()
 	alternative_branding_fixed=0
 	if is_kernel_present "$(get_partition "$kernel_name" "$inactive_name")"; then
 		alternative_is_missing=0
-		spinlock get 10 && mp="$(mount_alternative_system)"
+		spinlock get 10 && mp="$(printf "%s" "$(mount_alternative_system)")"
 		if ! [ -z "$mp" ]; then
 			readonly alternative_version="$(get_system_version "$mp")"
 			if ! [ -z "$alternative_version" ]; then
@@ -1314,7 +1360,6 @@ save_environment()
 #                                                                                                     #
 #######################################################################################################
 exec 2>&1
-set -e
 readonly tempdir="$tmpdir/$$_$(date +%s)"
 mkdir -p "$tempdir" 2>/dev/null
 trap cleanup HUP EXIT INT TERM
@@ -1349,7 +1394,7 @@ case "$1" in
 		printf "inactive filesystem = %s\n" "$(get_partition "$filesystem_name" "$inactive_name")"
 		if is_kernel_present "$(get_partition "$kernel_name" "$inactive_name")"; then
 			spinlock_pid=$$
-			spinlock get 10 && mp="$(mount_alternative_system)"
+			spinlock get 10 && mp="$(printf "%s" "$(mount_alternative_system)")"
 			printf "inactive filesystem mounted on %s\n" "$mp"
 			if ! [ -z "$mp" ]; then
 				printf "inactive system version = %s\n" "$(get_system_version "$mp")"
@@ -1359,6 +1404,8 @@ case "$1" in
 				printf "brandings supported on inactive system = %s%s\n" "$(get_brandings "$mp")" "$([ -z "$(get_fixed_branding "$mp")" ] || printf " (fixed)")"
 				dismount_alternative_system
 				printf "inactive filesystem dismounted\n"
+			else
+				printf "inactive filesystem could not be mounted\n"
 			fi
 			spinlock release
 		else
